@@ -4,7 +4,7 @@
 # the syntax tree into a string of JavaScript code, call `compile()` on the root.
 
 {Scope} = require './scope'
-{RESERVED} = require './lexer'
+{RESERVED, STRICT_PROSCRIBED} = require './lexer'
 
 # Import the helpers we plan to use.
 {compact, flatten, extend, merge, del, starts, ends, last} = require './helpers'
@@ -329,7 +329,7 @@ exports.Literal = class Literal extends Base
       if o.level >= LEVEL_ACCESS then '(void 0)' else 'void 0'
     else if @value is 'this'
       if o.scope.method?.bound then o.scope.method.context else @value
-    else if @value.reserved and "#{@value}" not in ['eval', 'arguments']
+    else if @value.reserved
       "\"#{@value}\""
     else
       @value
@@ -861,6 +861,8 @@ exports.Class = class Class extends Base
       tail instanceof Access and tail.name.value
     else
       @variable.base.value
+    if decl in STRICT_PROSCRIBED
+      throw SyntaxError 'variable name may not be eval or arguments'
     decl and= IDENTIFIER.test(decl) and decl
 
   # For all `this`-references and bound functions in the class definition,
@@ -1042,7 +1044,7 @@ exports.Assign = class Assign extends Base
       acc   = IDENTIFIER.test idx.unwrap().value or 0
       value = new Value value
       value.properties.push new (if acc then Access else Index) idx
-      if obj.unwrap().value in ['arguments','eval'].concat RESERVED
+      if obj.unwrap().value in RESERVED
         throw new SyntaxError "assignment to a reserved word: #{obj.compile o} = #{value.compile o}"
       return new Assign(obj, value, null, param: @param).compile o, LEVEL_TOP
     vvar    = value.compile o, LEVEL_LIST
@@ -1087,7 +1089,7 @@ exports.Assign = class Assign extends Base
         else
           acc = isObject and IDENTIFIER.test idx.unwrap().value or 0
         val = new Value new Literal(vvar), [new (if acc then Access else Index) idx]
-      if name? and name in ['arguments','eval'].concat RESERVED
+      if name? and name in RESERVED
         throw new SyntaxError "assignment to a reserved word: #{obj.compile o} = #{val.compile o}"
       assigns.push new Assign(obj, val, null, param: @param, subpattern: yes).compile o, LEVEL_LIST
     assigns.push vvar unless top or @subpattern
@@ -1210,6 +1212,8 @@ exports.Code = class Code extends Base
 # as well as be a splat, gathering up a group of parameters into an array.
 exports.Param = class Param extends Base
   constructor: (@name, @value, @splat) ->
+    if @name.unwrapAll().value in STRICT_PROSCRIBED
+      throw SyntaxError 'parameter name eval or arguments is not allowed'
 
   children: ['name', 'value']
 
@@ -1545,6 +1549,8 @@ exports.Try = class Try extends Base
     tryPart   = @attempt.compile o, LEVEL_TOP
 
     catchPart = if @recovery
+      if @error.value in STRICT_PROSCRIBED
+        throw SyntaxError "catch variable may not be eval or arguments"
       o.scope.add @error.value, 'param' unless o.scope.check @error.value
       " catch#{errorPart}{\n#{ @recovery.compile o, LEVEL_TOP }\n#{@tab}}"
     else unless @ensure or @recovery
