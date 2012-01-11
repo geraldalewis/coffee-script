@@ -24,11 +24,11 @@ strictOk = (code, msg) ->
 
 
 test "Octal Integer Literals prohibited", ->
-  strict    'n = 01'
-  strict    'n = 07777'
-  strictOk  'n = 09'
-  strictOk  'n = 079'
-  strictOk  'n = `01`'
+  strict    '01'
+  strict    '07777'
+  strictOk  '09'
+  strictOk  '079'
+  strictOk  '`01`'
 
 test "Octal Escape Sequences prohibited", ->
   strict    'e = "\\01"'
