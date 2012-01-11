@@ -135,7 +135,7 @@ exports.Lexer = class Lexer
     number = match[0]
     lexedLength = number.length
     if octalLiteral = /^0[0-7]+$/.test number
-      @error "octal literals are not allowed #{number}"
+      @error "octal literals \"#{number}\" are not allowed"
     if binaryLiteral = /0b([01]+)/.exec number
       number = (parseInt binaryLiteral[1], 2).toString()
     @token 'NUMBER', number
