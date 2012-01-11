@@ -90,11 +90,9 @@ test "duplicate formal parameter are prohibited", ->
   strictOk '(_case,@case)->'
   strictOk '(_case,@case...)->'
 
-test "`delete` operand is a var is prohibited", ->
+test "`delete` operand restrictions", ->
   strict 'a = 1; delete a'
   strictOk 'delete a' #noop
-
-test "`delete` operand is a parameter is prohibited", ->
   strict '(a) -> delete a'
   strict '(@a) -> delete a'
   strict '(a...) -> delete a'
