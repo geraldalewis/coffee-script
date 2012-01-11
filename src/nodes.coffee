@@ -979,6 +979,8 @@ exports.Assign = class Assign extends Base
   constructor: (@variable, @value, @context, options) ->
     @param = options and options.param
     @subpattern = options and options.subpattern
+    if @variable.unwrapAll().value in STRICT_PROSCRIBED
+      throw SyntaxError 'variable name may not be "eval" or "arguments"'
 
   children: ['variable', 'value']
 
