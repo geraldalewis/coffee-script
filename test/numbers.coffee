@@ -53,3 +53,15 @@ test '#1168: leading floating point suppresses newline', ->
 	eq 1, do ->
 		1
 		.5 + 0.5
+
+# Octal Literals
+# Octal literals are lexed to 
+test "Python-style octal literal notation '0o777'", ->
+  eq 511, 0o777
+  eq 1, 0o1
+  eq 1, 0o00001
+  eq parseInt('0777', 8), 0o777
+  eq '777', 0o777.toString 8
+  eq 4, 0o4.valueOf()
+  eq Number::toString, 0o777['toString']
+  eq Number::toString, 0o777.toString
