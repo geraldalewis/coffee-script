@@ -154,6 +154,63 @@ grammar =
     o 'AlphaNumeric'
     o 'ThisProperty'
   ]
+  
+  Pattern: [
+    o 'SimplePattern',                          -> new Value $1
+    o 'ArrayPattern',                           -> new Value $1
+    o 'ObjectPattern',                          -> new Value $1
+    o 'ThisProperty'
+  ]
+  
+  SimplePattern: [
+    o 'Identifier'
+  ]
+  
+  ObjectPattern: [
+    o '{ FieldListPattern OptComma }',          -> new Obj $2, $1.generated
+  ]
+  
+  FieldListPattern: [
+    o '',                                       -> []
+    o 'FieldPattern',                           -> [$1]
+    o 'FieldListPattern , FieldPattern',        -> $1.concat $3
+    o 'FieldListPattern OptComma TERMINATOR 
+       FieldPattern',                           -> $1.concat $4
+    o 'FieldListPattern OptComma INDENT 
+       FieldListPattern OptComma OUTDENT',      -> $1.concat $4
+  ]
+  
+  FieldPattern: [
+    o 'Identifier'
+    o 'ThisProperty'
+    o 'Identifier : Pattern',                   -> new Assign new Value($1), $3, 'object'
+    o 'Identifier : 
+       INDENT Pattern OUTDENT',                 -> new Assign new Value($1), $4, 'object'
+    o 'AlphaNumeric : Pattern',                 -> new Assign new Value($1), $3, 'object'
+    o 'AlphaNumeric : 
+      INDENT Pattern OUTDENT',                  -> new Assign new Value($1), $4, 'object'
+  ]
+  
+  ArrayPattern: [
+    o ' [ ] ',                                  -> new Arr []
+    o ' [ ElementListPattern OptComma ] ',      -> new Arr $2
+  ]
+  
+  ElementListPattern: [
+    o 'ElementPattern',                         -> [$1]
+    o 'ElementListPattern , ElementPattern',    -> $1.concat $3
+    o 'ElementListPattern OptComma 
+       TERMINATOR ElementPattern',              -> $1.concat $4
+    o 'INDENT ElementListPattern OptComma 
+       OUTDENT',                                -> $2
+    o 'ElementListPattern OptComma INDENT 
+       ElementListPattern OptComma OUTDENT',    -> $1.concat $4
+  ]
+ 
+  ElementPattern: [
+    o 'Pattern'
+    o 'Pattern ...',                            -> new Splat $1
+  ]
 
   # A return statement from a function body.
   Return: [
@@ -208,8 +265,8 @@ grammar =
   ParamVar: [
     o 'Identifier'
     o 'ThisProperty'
-    o 'Array'
-    o 'Object'
+    o 'ArrayPattern'
+    o 'ObjectPattern'
   ]
 
   # A splat that occurs outside of a parameter list.

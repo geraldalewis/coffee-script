@@ -321,7 +321,6 @@ exports.Literal = class Literal extends Base
     name is @value
   
   references: (o) -> [@value]
-  identifier: (o) -> @value
 
   jumps: (o) ->
     return this if @value is 'break' and not (o?.loop or o?.block)
@@ -414,18 +413,13 @@ exports.Value = class Value extends Base
   assigns     : (name) -> not @properties.length and @base.assigns name
   jumps       : (o)    -> not @properties.length and @base.jumps o
 
-  references: (o) ->
-    if @this?
-      return [@properties[0].name.value]
-    return @base.references(o)
-    
-  identifier: (o) -> 
+  references: (o, generateIdentifier = no) ->
     if @this?
       {value} = @properties[0].name
-      if value.reserved and o.generate
-        return @generatedId or= o.scope.freeVariable(value) 
-      return value
-    return @base.identifier(o)
+      if value.reserved and generateIdentifier
+        return [@generatedId or= o.scope.freeVariable(value)]
+      return [value]
+    return @base.references(o)
 
   isObject: (onlyGenerated) ->
     return no if @properties.length
@@ -847,14 +841,13 @@ exports.Obj = class Obj extends Base
     for prop in @properties when prop.assigns name then return yes
     no
   
-  references: (o) -> 
+  references: (o, generateIdentifier = no) -> 
     refs = []
     for prop in @properties
       refs.push prop.references(o)...
+    if generateIdentifier
+      refs.unshift @generatedId or= o.scope.freeVariable 'arg'
     refs
-  identifier: (o) ->
-    return null unless o.generate
-    @generatedId or= o.scope.freeVariable 'arg'
 
 #### Arr
 
@@ -882,14 +875,13 @@ exports.Arr = class Arr extends Base
     for obj in @objects when obj.assigns name then return yes
     no
 
-  references: (o) -> 
+  references: (o, generateIdentifier = no) -> 
     refs = []
     for obj in @objects
       refs.push obj.references(o)...
+    if generateIdentifier
+      refs.unshift @generatedId or= o.scope.freeVariable 'arg'
     refs
-  identifier: (o) ->
-    return null unless o.generate
-    @generatedId or= o.scope.freeVariable 'arg'
 
 #### Class
 
@@ -1047,14 +1039,12 @@ exports.Assign = class Assign extends Base
   isStatement: (o) ->
     o?.level is LEVEL_TOP and @context? and "?" in @context
 
-  lhs: ->
+  reference: ->
     @[if @context is 'object' then 'value' else 'variable']
     
-  assigns: (name) -> @lhs().assigns name
+  assigns: (name) -> @reference().assigns name
   
-  references: (o) -> @lhs().references(o)
-    
-  identifier: (o) -> @lhs().identifier(o)
+  references: (o) -> @reference().references(o)
 
   unfoldSoak: (o) ->
     unfoldSoak o, this, 'variable'
@@ -1230,21 +1220,22 @@ exports.Code = class Code extends Base
     
     # The CoffeeScript compiler generates parameter names for Patterns 
     # (ArrayPattern, ObjectPattern, ThisProperty). First reserve all 
-    # user-defined paramter names to prevent conflicts.
+    # user-defined parameter names to prevent conflicts.
     # (We don't want `({}, _arg) ->` to compile to `function(_arg, _arg) ...`)
     o.scope.parameter id for id in @paramIdentifiers(o)
     
     # Now that user-defined parameter names have been added to the current
     # scope, we can safely generate parameter names for Patterns.
-    identifiers = @paramIdentifiers(o, generate = yes)
+    identifiers = @paramIdentifiers(o)
     # Because `o.scope.parameter` is idempotent, we can safely redeclare
     # then non-Pattern parameters we defined in the previous step.
     o.scope.parameter id for id in identifiers
     
-    # Param identifiers don't map 1-to-1 with their references declared within 
-    # the function body. For instance, ArrayPatterns `([a,b])->` get a compiler
-    # generated identifier within the param list (`_arg`), while the contents 
-    # of the ArrayPattern get their own variable references (`var a, b;`).
+    # Identifiers for Patterns don't map 1-to-1 with their references declared 
+    # within the function body. For instance, ArrayPatterns `([a,b])->` get a 
+    # compiler generated identifier within the parameter list (`_arg`), 
+    # while the *contents* of the ArrayPattern (`a`, `b`) get their own 
+    # variable references (`var a, b;`).
     references = @paramReferences(o)
     
     # CoffeeScript adheres to JavaScript's (early error) `strict` mode and thus
@@ -1267,11 +1258,9 @@ exports.Code = class Code extends Base
       refs = new Arr(p.identifier(o, wrap = yes) for p in @params)
       splats = new Assign new Value(refs),
                           new Value new Literal 'arguments'
-                          
-    # Patterns need an assignment at the top of the function body
-    # to associate their identifier within the formal parameter list
-    # with their reference[s] within the function body.
-    # Parameter lists can contain an arbitrary number of optional parameters.
+
+    # All paramters are now added to the formal paramter list.
+    # Assignments are created for Patterns and optional parameters.
     for param in @params
       ref = param.identifier(o, wrap = yes)
       list.push ref unless splats
@@ -1293,6 +1282,7 @@ exports.Code = class Code extends Base
     o.scope.parameter list[i] = p.compile o for p, i in list
     
     @body.makeReturn() unless wasEmpty or @noReturn
+    
     if @bound
       if o.scope.parent.method?.bound
         @bound = @context = o.scope.parent.method.context
@@ -1306,18 +1296,15 @@ exports.Code = class Code extends Base
     code  += '}'
     return @tab + code if @ctor
     if @front or (o.level >= LEVEL_ACCESS) then "(#{code})" else code
-
-  paramIdentifiers: (o, generate = no) ->
-    o.generate = generate
-    ids = (id for param in @params when (id = param.identifier(o)) and id?)
-    o.generate = no
-    ids
   
+  paramIdentifiers: (o) ->
+    ids = (id for param in @params when id = param.identifier o, wrap = no, generate = no)
+    ids = (id for id in ids when id?)
+    
   paramReferences: (o) ->
     refs = []
     refs.push param.references(o)... for param in @params
     refs = (ref for ref in refs when ref?)
-    refs
 
   # Short-circuit `traverseChildren` method to prevent it from crossing scope boundaries
   # unless `crossScope` is `true`.
@@ -1342,20 +1329,18 @@ exports.Param = class Param extends Base
   isComplex: ->
     @name.isComplex()
 
-  # Parameters 
-  references: (o) -> 
-    refs = try @name.references(o)
+  # Pattern parameters 
+  references: (o, generateIdentifiers = yes) -> 
+    refs = try @name.references(o, generateIdentifiers)
     catch e
       throw new ReferenceError "invalid assignment to #{@name.compile(o)}"
-    refs.push @name.generatedId if @name.generatedId?
     refs
 
   # If the param is an @-param with a reserved name `@case`
   # or if the param is a pattern `{x}`, generate an identifier for
   # the function's formal parameter list.
-  identifier: (o, wrap = no) ->
-    id = @name.identifier(o)
-    id = @name.generatedId unless id?
+  identifier: (o, wrap = no, generateIdentifiers = yes) ->
+    id = @references(o, generateIdentifiers)[0]
     return id unless wrap
     node = new Literal id
     node = new Value   node
@@ -1380,10 +1365,6 @@ exports.Splat = class Splat extends Base
     @name.assigns name
 
   references: (o) -> @name.references(o)
-  identifier: (o) -> 
-    # null
-    # @name.identifier(o).concat @references(o) # ?
-    @name.identifier(o)
 
   compile: (o) ->
     if @index? then @compileParam o else @name.compile o

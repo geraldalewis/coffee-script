@@ -43,8 +43,15 @@ test 'Param Patterns', ->
   #(({'x'})      -> eq(x,noncex)).call {}, o # 'x' cannot be assigned
   (({'x':x})    -> eq(x,noncex)).call {}, o
   
+  # test with {0:x} {'x':y}, etc
+  
+  ###
+  Illegal productions; enable if no grammar change
+  {y:x()}
+  {y():x}
   try CoffeeScript.compile "({@x:a})->" 
   catch e
     referror = e
   unless referror instanceof ReferenceError
       throw "ThisProperty on the LHS of ObjectPattern assign should throw error."
+  ###
