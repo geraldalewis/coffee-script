@@ -1186,6 +1186,91 @@ exports.Assign = class Assign extends Base
     code = "[].splice.apply(#{name}, [#{fromDecl}, #{to}].concat(#{valDef})), #{valRef}"
     if o.level > LEVEL_TOP then "(#{code})" else code
 
+##### Pattern
+exports.Pattern = class Pattern extends Base
+  compilePatternMatch: (o) ->
+    top       = o.level is LEVEL_TOP
+    {value}   = this
+    {objects} = @variable.base
+    unless olen = objects.length
+      code = value.compile o
+      return if o.level >= LEVEL_OP then "(#{code})" else code
+    isObject = @variable.isObject()
+    if top and olen is 1 and (obj = objects[0]) not instanceof Splat
+      if obj instanceof Assign
+        [obj, idx] = @compileObjectPattern(obj, o)
+      else
+        if obj.base instanceof Parens
+          [obj, idx] = new Value(obj.unwrapAll()).cacheReference o
+        else
+          idx = if isObject
+            if obj.this then obj.references()[0] else obj
+          else
+            new Literal 0
+      acc   = IDENTIFIER.test idx.unwrap().value or 0
+      value = new Value value
+      value.properties.push new (if acc then Access else Index) idx
+      if obj.unwrap().value in RESERVED
+        throw new SyntaxError "assignment to a reserved word: #{obj.compile o} = #{value.compile o}"
+      return new Assign(obj, value, null, param: @param).compile o, LEVEL_TOP
+    vvar    = value.compile o, LEVEL_LIST
+    assigns = []
+    splat   = false
+    if not IDENTIFIER.test(vvar) or @variable.assigns(vvar)
+      assigns.push "#{ ref = o.scope.freeVariable 'ref' } = #{vvar}"
+      vvar = ref
+    for obj, i in objects
+      # A regular array pattern-match.
+      idx = i
+      [obj, idx] = @compileObjectPattern(obj, o) if isObject
+      if obj instanceof Splat
+        if not splat
+          [obj, idx, val, splat] = @compileSplattedPattern(obj, vvar, o) 
+        else 
+          err = "multiple splats are disallowed in an assignment: #{obj.name.compile(o)}..."
+          throw new SyntaxError err
+      else
+        name = obj.unwrap().value
+        if typeof idx is 'number'
+          idx = new Literal splat or idx
+          acc = no
+        else
+          acc = isObject and IDENTIFIER.test idx.unwrap().value or 0
+        val = new Value new Literal(vvar), [new (if acc then Access else Index) idx]
+      if name? and name in RESERVED
+        throw new SyntaxError "assignment to a reserved word: #{obj.compile o} = #{val.compile o}"
+      assigns.push new Assign(obj, val, null, param: @param, subpattern: yes).compile o, LEVEL_LIST
+    assigns.push vvar unless top or @subpattern
+    code = assigns.join ', '
+    if o.level < LEVEL_LIST then code else "(#{code})"
+  
+  compileObjectPattern: (obj, o) ->
+    if obj instanceof Assign
+      # A regular object pattern-match.
+      # Unroll simplest cases: `{v} = x` -> `v = x.v`
+      {variable: {base: idx}, value: obj} = obj
+      throw new ReferenceError 'invalid assignment to "this"' if idx.value is 'this'
+    else
+      # A shorthand `{a, b, @c} = val` pattern-match.
+      if obj.base instanceof Parens
+        [obj, idx] = new Value(obj.unwrapAll()).cacheReference o
+      else
+        idx = if obj.this then obj.references()[0] else obj
+    [obj, idx]
+    
+  compileSplattedPattern: (obj, vvar, o) ->
+    name = obj.name.unwrap().value
+    obj = obj.unwrap()
+    val = "#{olen} <= #{vvar}.length ? #{ utility 'slice' }.call(#{vvar}, #{i}"
+    if rest = olen - i - 1
+      ivar = o.scope.freeVariable 'i'
+      val += ", #{ivar} = #{vvar}.length - #{rest}) : (#{ivar} = #{i}, [])"
+    else
+      val += ") : []"
+    val   = new Literal val
+    splat = "#{ivar}++"
+    [obj, idx, val, splat]
+
 #### Code
 
 # A function definition. This is the only node that creates a new Scope.
