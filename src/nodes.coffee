@@ -319,6 +319,9 @@ exports.Literal = class Literal extends Base
 
   assigns: (name) ->
     name is @value
+  
+  references: (o) -> 
+    [@value]
 
   jumps: (o) ->
     return this if @value is 'break' and not (o?.loop or o?.block)
@@ -410,6 +413,14 @@ exports.Value = class Value extends Base
   isStatement : (o)    -> not @properties.length and @base.isStatement o
   assigns     : (name) -> not @properties.length and @base.assigns name
   jumps       : (o)    -> not @properties.length and @base.jumps o
+  
+  references: (o, generateIdentifier = no) ->
+    if @this?
+      {value} = @properties[0].name
+      if value.reserved and generateIdentifier
+        return [@generatedId or= o.scope.freeVariable(value)]
+      return [value]
+    return @base.references(o)
 
   isObject: (onlyGenerated) ->
     return no if @properties.length
@@ -829,6 +840,15 @@ exports.Obj = class Obj extends Base
   assigns: (name) ->
     for prop in @properties when prop.assigns name then return yes
     no
+  
+  references: (o, generateIdentifier = no) -> 
+    refs = []
+    for obj in @objects
+      refs.push obj.references(o)...
+    if generateIdentifier
+      refs.unshift @generatedId or= o.scope.freeVariable 'arg'
+    refs
+
 
 #### Arr
 
@@ -855,6 +875,14 @@ exports.Arr = class Arr extends Base
   assigns: (name) ->
     for obj in @objects when obj.assigns name then return yes
     no
+
+  references: (o, generateIdentifier = no) -> 
+    refs = []
+    for obj in @objects
+      refs.push obj.references(o)...
+    if generateIdentifier
+      refs.unshift @generatedId or= o.scope.freeVariable 'arg'
+    refs
 
 #### Class
 
@@ -1012,8 +1040,14 @@ exports.Assign = class Assign extends Base
   isStatement: (o) ->
     o?.level is LEVEL_TOP and @context? and "?" in @context
 
-  assigns: (name) ->
-    @[if @context is 'object' then 'value' else 'variable'].assigns name
+  reference: ->
+    @[if @context is 'object' then 'value' else 'variable']
+
+  assigns: (name) -> 
+    @reference().assigns name
+
+  references: (o) -> 
+    @reference().references(o)
 
   unfoldSoak: (o) ->
     unfoldSoak o, this, 'variable'
@@ -1030,7 +1064,7 @@ exports.Assign = class Assign extends Base
     name = @variable.compile o, LEVEL_LIST
     unless @context
       unless (varBase = @variable.unwrapAll()).isAssignable()
-        throw SyntaxError "\"#{ @variable.compile o }\" cannot be assigned."
+        throw ReferenceError "\"#{ @variable.compile o }\" cannot be assigned."
       unless varBase.hasProperties?()
         if @param
           o.scope.add name, 'var'
@@ -1060,6 +1094,7 @@ exports.Assign = class Assign extends Base
       # Unroll simplest cases: `{v} = x` -> `v = x.v`
       if obj instanceof Assign
         {variable: {base: idx}, value: obj} = obj
+        throw ReferenceError 'invalid assignment to "this"' if idx.value is 'this'
       else
         if obj.base instanceof Parens
           [obj, idx] = new Value(obj.unwrapAll()).cacheReference o
@@ -1087,6 +1122,7 @@ exports.Assign = class Assign extends Base
         if obj instanceof Assign
           # A regular object pattern-match.
           {variable: {base: idx}, value: obj} = obj
+          throw ReferenceError 'invalid assignment to "this"' if idx.value is 'this'
         else
           # A shorthand `{a, b, @c} = val` pattern-match.
           if obj.base instanceof Parens
@@ -1173,48 +1209,81 @@ exports.Code = class Code extends Base
   jumps: NO
 
   # Compilation creates a new scope unless explicitly asked to share with the
-  # outer scope. Handles splat parameters in the parameter list by peeking at
-  # the JavaScript `arguments` object. If the function is bound with the `=>`
-  # arrow, generates a wrapper that saves the current value of `this` through
-  # a closure.
+  # outer scope. If the function is bound with the `=>` arrow, generates a 
+  # wrapper that saves the current value of `this` through a closure.
   compileNode: (o) ->
     o.scope         = new Scope o.scope, @body, this
     o.scope.shared  = del(o, 'sharedScope')
     o.indent        += TAB
     delete o.bare
     delete o.isExistentialEquals
-    params = []
-    exprs  = []
-    for name in @paramNames() # this step must be performed before the others
-      unless o.scope.check name then o.scope.parameter name
-    for param in @params when param.splat
-      for {name: p} in @params
-        if p.this then p = p.properties[0].name
-        if p.value then o.scope.add p.value, 'var', yes
-      splats = new Assign new Value(new Arr(p.asReference o for p in @params)),
-                          new Value new Literal 'arguments'
-      break
-    for param in @params
-      if param.isComplex()
-        val = ref = param.asReference o
-        val = new Op '?', ref, param.value if param.value
-        exprs.push new Assign new Value(param.name), val, '=', param: yes
-      else
-        ref = param
-        if param.value
-          lit = new Literal ref.name.value + ' == null'
-          val = new Assign new Value(param.name), param.value, '='
-          exprs.push new If lit, val
-      params.push ref unless splats
-    wasEmpty = @body.isEmpty()
-    exprs.unshift splats if splats
-    @body.expressions.unshift exprs... if exprs.length
-    o.scope.parameter params[i] = p.compile o for p, i in params
+    list    = []
+    assigns = []
+    
+    # The CoffeeScript compiler generates parameter names for Patterns 
+    # (ArrayPattern, ObjectPattern, ThisProperty). First reserve all 
+    # user-defined parameter names to prevent conflicts.
+    # (We don't want `({}, _arg) ->` to compile to `function(_arg, _arg) ...`)
+    o.scope.parameter id for id in @paramIdentifiers(o)
+    
+    # Now that user-defined parameter names have been added to the current
+    # scope, we can generate parameter names for Patterns.
+    identifiers = @paramIdentifiers(o)
+    # Because `o.scope.parameter` is idempotent, we can safely redeclare
+    # the non-Pattern parameters we defined in the previous step.
+    o.scope.parameter id for id in identifiers
+    
+    # Identifiers for Patterns don't map 1-to-1 with their references declared 
+    # within the function body. For instance, ArrayPatterns `([a,b])->` get a 
+    # compiler generated identifier within the parameter list (`_arg`), 
+    # while the *contents* of the ArrayPattern (`a`, `b`) get their own 
+    # variable references (`var a, b;`).
+    references = @paramReferences(o)
+    
+    # CoffeeScript adheres to JavaScript's (early error) `strict` mode and thus
+    # prohibits duplicate formal parameter names. Because Patterns may represent
+    # multiple references, and because those reference names may conflict with 
+    # other parameter names, we must search through the references generated
+    # by both Pattern and vanilla parameters and throw a SyntaxError when we
+    # encounter duplicates.
     uniqs = []
-    for name in @paramNames()
+    for name in references
       throw SyntaxError "multiple parameters named '#{name}'" if name in uniqs
       uniqs.push name
+    
+    # When a formal parameter list is variadic (contains a Splat), we empty
+    # the list of *all* identifiers, and redeclare them as references.
+    # E.g., `(a...) ->` => `function(){ var a; ... }`.
+    variadic = yes for param in @params when param.splat
+    if variadic
+      o.scope.add id, 'var', yes for id in identifiers
+      refs = new Arr(p.identifier(o, wrap = yes) for p in @params)
+      splats = new Assign new Value(refs), new Value new Literal 'arguments'
+    
+    # Add all parameter identifiers to the formal parameter list.
+    # Create assignments for any optional params and any patterns.
+    for param in @params
+      id = param.identifier(o, wrap = yes)
+      list.push id unless variadic
+      if param.isComplex()
+        val = if param.value then new Op('?', id, param.value) else id
+        assigns.push new Assign new Value(param.name), val, '=', param: yes
+      else if param.value
+        lit = new Literal param.name.value + ' == null'
+        val = new Assign new Value(param.name), param.value, '='
+        assigns.push new If lit, val
+    
+    # Cache the state of the function body. We'll use this to determine
+    # if a `return` is necessary.
+    wasEmpty = @body.isEmpty()
+    # Declare the assignments for Pattern and optional parameters.
+    assigns.unshift splats if variadic
+    @body.expressions.unshift assigns... if assigns.length
+    # Compile the formal parameter list.
+    o.scope.parameter list[i] = p.compile o for p, i in list
+    
     @body.makeReturn() unless wasEmpty or @noReturn
+    
     if @bound
       if o.scope.parent.method?.bound
         @bound = @context = o.scope.parent.method.context
@@ -1223,17 +1292,24 @@ exports.Code = class Code extends Base
     idt   = o.indent
     code  = 'function'
     code  += ' ' + @name if @ctor
-    code  += '(' + params.join(', ') + ') {'
+    code  += '(' + list.join(', ') + ') {'
     code  += "\n#{ @body.compileWithDeclarations o }\n#{@tab}" unless @body.isEmpty()
     code  += '}'
     return @tab + code if @ctor
     if @front or (o.level >= LEVEL_ACCESS) then "(#{code})" else code
-
-  # A list of parameter names, excluding those generated by the compiler.
-  paramNames: ->
-    names = []
-    names.push param.names()... for param in @params
-    names
+  
+  # Cycle through each parameter to generate a list of identifiers to be used
+  # in the formal parameter list.
+  paramIdentifiers: (o) ->
+    ids = (id for param in @params when id = param.identifier(o, wrap = no, generate = no))
+    ids = (id for id in ids when id?)
+  
+  # Cycle through each parameter to generate a list of references (pattern parameters
+  # may map to multiple references).
+  paramReferences: (o) ->
+    refs = []
+    refs.push param.references(o)... for param in @params
+    refs = (ref for ref in refs when ref?)
 
   # Short-circuit `traverseChildren` method to prevent it from crossing scope boundaries
   # unless `crossScope` is `true`.
@@ -1245,6 +1321,8 @@ exports.Code = class Code extends Base
 # A parameter in a function definition. Beyond a typical Javascript parameter,
 # these parameters can also attach themselves to the context of the function,
 # as well as be a splat, gathering up a group of parameters into an array.
+# Parameters may also be ObjectPatterns `{x,y,z}`, ArrayPatterns `[x,y,z]`
+# or ThisProperties `@x,@y,@z`.
 exports.Param = class Param extends Base
   constructor: (@name, @value, @splat) ->
     if (name = @name.unwrapAll().value) in STRICT_PROSCRIBED
@@ -1255,57 +1333,31 @@ exports.Param = class Param extends Base
   compile: (o) ->
     @name.compile o, LEVEL_LIST
 
-  asReference: (o) ->
-    return @reference if @reference
-    node = @name
-    if node.this
-      node = node.properties[0].name
-      if node.value.reserved
-        node = new Literal o.scope.freeVariable node.value
-    else if node.isComplex()
-      node = new Literal o.scope.freeVariable 'arg'
-    node = new Value node
-    node = new Splat node if @splat
-    @reference = node
+  # Pattern parameters can destructure to multiple references. For example, 
+  # `[a,b,c]` represents three references (`a`, `b`, and `c`). Finding a 
+  # parameter's references is useful for detecting duplicate formal params.
+  references: (o, generateIdentifiers = yes) -> 
+    refs = try @name.references(o, generateIdentifiers)
+    catch e
+      throw new ReferenceError "invalid assignment to #{@name.compile(o)}"
+    refs
+  
+  # The name of the formal parameter.
+  # If the param is an @-param with a reserved name `@case`
+  # or if the param is a pattern `{x}`, generate an identifier for
+  # the function's formal parameter list.
+  # By default, we represent the identifier as a `String`. If the
+  # `wrap` parameter is `true`, the identifier will be a node.
+  identifier: (o, wrap = no, generateIdentifiers = yes) ->
+    id = @references(o, generateIdentifiers)[0]
+    return id unless wrap
+    node = new Literal id
+    node = new Value   node
+    node = new Splat   node if @splat
+    node
 
   isComplex: ->
     @name.isComplex()
-
-  # Finds the name or names of a `Param`; useful for detecting duplicates.
-  # In a sense, a destructured parameter represents multiple JS parameters,
-  # thus this method returns an `Array` of names.
-  # Reserved words used as param names, as well as the Object and Array
-  # literals used for destructured params, get a compiler generated name
-  # during the `Code` compilation step, so this is necessarily an incomplete
-  # list of a parameter's names.
-  names: (name = @name)->
-    atParam = (obj) ->
-      {value} = obj.properties[0].name
-      return if value.reserved then [] else [value]
-    # * simple literals `foo`
-    return [name.value] if name instanceof Literal
-    # * at-params `@foo`
-    return atParam(name) if name instanceof Value
-    names = []
-    for obj in name.objects
-      # * assignments within destructured parameters `{foo:bar}`
-      if obj instanceof Assign
-        names.push obj.value.unwrap().value
-      # * splats within destructured parameters `[xs...]`
-      else if obj instanceof Splat
-        names.push obj.name.unwrap().value
-      else if obj instanceof Value
-        # * destructured parameters within destructured parameters `[{a}]`
-        if obj.isArray() or obj.isObject()
-          names.push @names(obj.base)...
-        # * at-params within destructured parameters `{@foo}`
-        else if obj.this
-          names.push atParam(obj)...
-        # * simple destructured parameters {foo}
-        else names.push obj.base.value
-      else
-        throw SyntaxError "illegal parameter #{obj.compile()}"
-    names
 
 #### Splat
 
@@ -1322,7 +1374,10 @@ exports.Splat = class Splat extends Base
 
   assigns: (name) ->
     @name.assigns name
-
+  
+  references: (o) -> 
+    @name.references(o)
+  
   compile: (o) ->
     if @index? then @compileParam o else @name.compile o
 
