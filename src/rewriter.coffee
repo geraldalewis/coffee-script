@@ -26,6 +26,7 @@ class exports.Rewriter
     @tagPostfixConditionals()
     @addImplicitBraces()
     @addImplicitParentheses()
+    @addImplicitFieldValues()
     @tokens
 
   # Rewrite the token stream, looking one token ahead and behind.
@@ -147,6 +148,93 @@ class exports.Rewriter
       tokens.splice idx, 0, tok
       @detectEnd i + 2, condition, action
       2
+  
+  addImplicitFieldValues: ->
+    
+    stack  = []
+    calls  = []
+    params = []
+    arrays = []
+    
+    action = (token, i) ->
+      if token[0] is '@'
+        id = @tokens[i + 1]
+        @tokens.splice i, 1
+        @tokens.splice i + 1, 0, @generate ':', ':', token[2]
+        @tokens.splice i + 2, 0, @generate token[0], token[1], token[2]
+        @tokens.splice i + 3, 0, @generate id[0], id[1], id[2]
+        return
+      @tokens.splice i + 1, 0, @generate ':', ':', token[2]
+      @tokens.splice i + 2, 0, @generate token[0], token[1], token[2]
+  
+    level = 0
+    scanner = (token, i, tokens) ->
+      tag = token[0]
+      
+      
+      stack.push({i:i, level:level}) if tag is '{'
+      stack.pop()  if tag is '}'
+      params.push i if tag is 'PARAM_START'
+      params.pop()  if tag is 'PARAM_END'
+      calls.push i if tag is 'CALL_START'
+      calls.pop()  if tag is 'CALL_END'
+      level += 1   if tag in ['INDENT', '[']
+      level -= 1   if tag in ['DEDENT', ']']
+      
+      return 1 unless stack.length
+      
+      if params.length
+        paramIndex  = params[params.length - 1]
+        stackIndex  = stack[stack.length - 1].i
+        inParams    = paramIndex > stackIndex
+      
+      if arrays.length
+        arrayIndex  = arrays.length
+        stackIndex  = stack.length
+        inArray     = arrayIndex >= stackIndex
+      
+      
+      if calls.length
+        if tag isnt '{' and level <= calls.length
+          return 1
+      
+      return 1 unless tag is '{' or ((!inParams) && (!inArray) && stack.length and tag is ',')
+
+      return 1 if stack.length && stack[stack.length - 1].level isnt level
+      
+      r1 = @tag i + 1
+      r2 = @tag i + 2
+      r3 = @tag i + 3
+      
+      if r1 is 'IDENTIFIER'
+        return 1 if r2 is ':'
+        action.call this, @tokens[i + 1], i + 1
+        return 1
+      
+      if r1 is '@'
+        return 2 if r3 is ':'
+        action.call this, @tokens[i + 1], i + 1
+        return 2
+      
+      # unless this is a herecomment, it can't legally be a field name
+      # (e.g., it's a "NUMBER"). # check if generated = true
+      return 1 if r1 is 'HERECOMMENT'
+      
+      endBrace = i
+      endBraces = 0
+      while endBrace < @tokens.length - 1
+        tag = @tag(++endBrace)
+        ++endBraces if tag is '{'
+        if tag is '}'
+          continue unless --endBraces is 0
+          @tokens.splice endBrace, 1
+          @tokens.splice i, 0, @generate('}', '}', token[2])
+          return 1
+      
+      return 1
+      
+    @scanTokens scanner
+      
 
   # Methods may be optionally called without parentheses, for simple cases.
   # Insert the implicit parentheses here, so that the parser doesn't have to
